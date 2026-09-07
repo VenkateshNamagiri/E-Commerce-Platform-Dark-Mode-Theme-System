@@ -1,0 +1,802 @@
+import os
+import uuid
+from flask import Flask, request, jsonify, session
+from flask_cors import CORS
+from flask_bcrypt import Bcrypt
+from werkzeug.utils import secure_filename
+from functools import wraps
+from config import get_db
+
+app = Flask(__name__)
+app.secret_key = "change-this-to-something-random-in-production"
+
+# allow the Vite dev server to send/receive cookies
+CORS(app, supports_credentials=True, origins=["http://localhost:5173"])
+bcrypt = Bcrypt(app)
+
+# ------------------------------------------------------------------
+# Image upload config
+# ------------------------------------------------------------------
+UPLOAD_FOLDER = os.path.join(app.root_path, "static", "uploads")
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
+MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
+
+
+def allowed_file(filename):
+    ext = filename.rsplit(".", 1)[-1].lower()
+    return "." in filename and ext in ALLOWED_EXTENSIONS
+
+
+# ------------------------------------------------------------------
+# Helpers / decorators
+# ------------------------------------------------------------------
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "Login required"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def admin_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "Login required"}), 401
+        if session.get("role") != "admin":
+            return jsonify({"error": "Admin access only"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# ------------------------------------------------------------------
+# Auth routes
+# ------------------------------------------------------------------
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = request.get_json() or {}
+    name = data.get("name", "").strip()
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    if not name or not email or not password:
+        return jsonify({"error": "name, email and password are required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    hashed = bcrypt.generate_password_hash(password).decode("utf-8")
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+        if cur.fetchone():
+            return jsonify({"error": "Email already registered"}), 409
+
+        cur.execute(
+            "INSERT INTO users (name, email, password, role) VALUES (%s, %s, %s, 'customer')",
+            (name, email, hashed),
+        )
+        db.commit()
+        user_id = cur.lastrowid
+
+        session["user_id"] = user_id
+        session["role"] = "customer"
+        session["name"] = name
+
+        return jsonify({"id": user_id, "name": name, "email": email, "role": "customer"}), 201
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+
+        if not user or not bcrypt.check_password_hash(user["password"], password):
+            return jsonify({"error": "Invalid email or password"}), 401
+
+        session["user_id"] = user["id"]
+        session["role"] = user["role"]
+        session["name"] = user["name"]
+
+        return jsonify({
+            "id": user["id"], "name": user["name"],
+            "email": user["email"], "role": user["role"],
+        })
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/logout", methods=["GET"])
+def logout():
+    session.clear()
+    return jsonify({"message": "Logged out"})
+
+
+@app.route("/api/me", methods=["GET"])
+def me():
+    if "user_id" not in session:
+        return jsonify({"user": None})
+    return jsonify({
+        "user": {
+            "id": session["user_id"],
+            "name": session["name"],
+            "role": session["role"],
+        }
+    })
+
+
+# ------------------------------------------------------------------
+# Category routes
+# ------------------------------------------------------------------
+@app.route("/api/categories", methods=["GET"])
+def get_categories():
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT * FROM categories ORDER BY name")
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Image upload (admin only)
+# ------------------------------------------------------------------
+@app.route("/api/upload", methods=["POST"])
+@admin_required
+def upload_image():
+    if "image" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+
+    if not allowed_file(file.filename):
+        return jsonify({"error": "Invalid file type. Allowed: png, jpg, jpeg, webp"}), 400
+
+    # Generate a unique filename so uploads never overwrite each other
+    ext = file.filename.rsplit(".", 1)[-1].lower()
+    unique_name = f"{uuid.uuid4().hex}.{ext}"
+    safe_name = secure_filename(unique_name)
+    filepath = os.path.join(app.config["UPLOAD_FOLDER"], safe_name)
+    file.save(filepath)
+
+    # relative path only - the file lives inside static/, so Flask serves it
+    # automatically at http://localhost:5000/static/uploads/<filename>
+    image_url = f"/static/uploads/{safe_name}"
+    return jsonify({"image_url": image_url}), 201
+
+
+# ------------------------------------------------------------------
+# Product routes (public)
+# ------------------------------------------------------------------
+@app.route("/api/products", methods=["GET"])
+def get_products():
+    category = request.args.get("category")
+    search = request.args.get("search")
+    sort = request.args.get("sort")
+
+    query = """
+        SELECT p.*, c.name AS category_name,
+               ROUND(AVG(r.rating), 1) AS avg_rating,
+               COUNT(DISTINCT r.id) AS rating_count
+        FROM products p
+        LEFT JOIN categories c ON p.category_id = c.id
+        LEFT JOIN ratings r ON r.product_id = p.id
+        WHERE 1=1
+    """
+    params = []
+
+    if category:
+        query += " AND p.category_id = %s"
+        params.append(category)
+
+    if search:
+        query += " AND (p.name LIKE %s OR p.description LIKE %s)"
+        like = f"%{search}%"
+        params.extend([like, like])
+
+    query += " GROUP BY p.id"
+
+    sort_map = {
+        "price_asc": " ORDER BY p.price ASC",
+        "price_desc": " ORDER BY p.price DESC",
+        "newest": " ORDER BY p.created_at DESC",
+    }
+    query += sort_map.get(sort, " ORDER BY p.id ASC")
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute(query, params)
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/products/<int:product_id>", methods=["GET"])
+def get_product(product_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT p.*, c.name AS category_name,
+                   ROUND(AVG(r.rating), 1) AS avg_rating,
+                   COUNT(r.id) AS rating_count
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN ratings r ON r.product_id = p.id
+            WHERE p.id = %s
+            GROUP BY p.id
+        """, (product_id,))
+        product = cur.fetchone()
+        if not product:
+            return jsonify({"error": "Product not found"}), 404
+        return jsonify(product)
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Rating routes
+# ------------------------------------------------------------------
+@app.route("/api/products/<int:product_id>/ratings", methods=["GET"])
+def get_product_ratings(product_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT r.*, u.name AS customer_name
+            FROM ratings r
+            JOIN users u ON r.user_id = u.id
+            WHERE r.product_id = %s
+            ORDER BY r.created_at DESC
+        """, (product_id,))
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/products/<int:product_id>/ratings", methods=["POST"])
+@login_required
+def rate_product(product_id):
+    data = request.get_json() or {}
+    rating = data.get("rating")
+    review = data.get("review", "")
+
+    if not isinstance(rating, int) or not (1 <= rating <= 5):
+        return jsonify({"error": "Rating must be an integer from 1 to 5"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        # only customers who actually bought this product may rate it
+        cur.execute("""
+            SELECT 1
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            WHERE o.user_id = %s AND oi.product_id = %s
+            LIMIT 1
+        """, (session["user_id"], product_id))
+        if not cur.fetchone():
+            return jsonify({"error": "You can only rate products you have purchased"}), 403
+
+        # one rating per user per product - insert or update
+        cur.execute("""
+            INSERT INTO ratings (user_id, product_id, rating, review)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE rating = VALUES(rating), review = VALUES(review)
+        """, (session["user_id"], product_id, rating, review))
+        db.commit()
+        return jsonify({"message": "Rating saved"}), 201
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Wishlist routes (customer)
+# ------------------------------------------------------------------
+@app.route("/api/wishlist", methods=["GET"])
+@login_required
+def get_wishlist():
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT p.*, c.name AS category_name, w.added_at,
+                   ROUND(AVG(r.rating), 1) AS avg_rating,
+                   COUNT(DISTINCT r.id) AS rating_count
+            FROM wishlist w
+            JOIN products p ON w.product_id = p.id
+            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN ratings r ON r.product_id = p.id
+            WHERE w.user_id = %s
+            GROUP BY p.id, w.added_at
+            ORDER BY w.added_at DESC
+        """, (session["user_id"],))
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/wishlist", methods=["POST"])
+@login_required
+def add_to_wishlist():
+    data = request.get_json() or {}
+    product_id = data.get("product_id")
+    if not product_id:
+        return jsonify({"error": "product_id is required"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            INSERT IGNORE INTO wishlist (user_id, product_id) VALUES (%s, %s)
+        """, (session["user_id"], product_id))
+        db.commit()
+        return jsonify({"message": "Added to wishlist"}), 201
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/wishlist/<int:product_id>", methods=["DELETE"])
+@login_required
+def remove_from_wishlist(product_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "DELETE FROM wishlist WHERE user_id = %s AND product_id = %s",
+            (session["user_id"], product_id),
+        )
+        db.commit()
+        return jsonify({"message": "Removed from wishlist"})
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Product routes (admin only)
+# ------------------------------------------------------------------
+@app.route("/api/products", methods=["POST"])
+@admin_required
+def create_product():
+    data = request.get_json() or {}
+    required = ["name", "price", "stock"]
+    if any(f not in data or data[f] in ("", None) for f in required):
+        return jsonify({"error": "name, price and stock are required"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            INSERT INTO products (name, description, price, stock, category_id, image_url)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            data["name"], data.get("description", ""), data["price"],
+            data["stock"], data.get("category_id"), data.get("image_url", ""),
+        ))
+        db.commit()
+        return jsonify({"id": cur.lastrowid, "message": "Product created"}), 201
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/products/<int:product_id>", methods=["PUT"])
+@admin_required
+def update_product(product_id):
+    data = request.get_json() or {}
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id FROM products WHERE id = %s", (product_id,))
+        if not cur.fetchone():
+            return jsonify({"error": "Product not found"}), 404
+
+        cur.execute("""
+            UPDATE products
+            SET name=%s, description=%s, price=%s, stock=%s,
+                category_id=%s, image_url=%s
+            WHERE id=%s
+        """, (
+            data.get("name"), data.get("description", ""), data.get("price"),
+            data.get("stock"), data.get("category_id"), data.get("image_url", ""),
+            product_id,
+        ))
+        db.commit()
+        return jsonify({"message": "Product updated"})
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/products/<int:product_id>", methods=["DELETE"])
+@admin_required
+def delete_product(product_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("DELETE FROM products WHERE id = %s", (product_id,))
+        db.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "Product not found"}), 404
+        return jsonify({"message": "Product deleted"})
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Order routes (customer)
+# ------------------------------------------------------------------
+@app.route("/api/orders", methods=["POST"])
+@login_required
+def create_order():
+    data = request.get_json() or {}
+    items = data.get("items", [])
+    address = data.get("address", "").strip()
+    coupon_code = (data.get("coupon_code") or "").strip().upper()
+
+    if not items:
+        return jsonify({"error": "Cart is empty"}), 400
+    if not address:
+        return jsonify({"error": "Delivery address is required"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        # --- Step 1: validate stock for every item BEFORE changing anything ---
+        product_rows = {}
+        subtotal = 0
+        for item in items:
+            product_id = item.get("product_id")
+            quantity = int(item.get("quantity", 0))
+            if quantity <= 0:
+                return jsonify({"error": "Invalid quantity"}), 400
+
+            cur.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+            product = cur.fetchone()
+            if not product:
+                return jsonify({"error": f"Product {product_id} does not exist"}), 400
+            if product["stock"] < quantity:
+                return jsonify({
+                    "error": f"'{product['name']}' has only {product['stock']} in stock "
+                             f"(requested {quantity})"
+                }), 400
+
+            product_rows[product_id] = {"product": product, "quantity": quantity}
+            subtotal += float(product["price"]) * quantity
+
+        # --- Step 1b: validate coupon (if provided) ---
+        discount_amount = 0.0
+        applied_code = None
+        if coupon_code:
+            coupon = get_valid_coupon(cur, coupon_code)
+            if not coupon:
+                return jsonify({"error": "Invalid or expired coupon code"}), 400
+            discount_amount = round(subtotal * coupon["discount_percent"] / 100, 2)
+            applied_code = coupon["code"]
+
+        total = round(subtotal - discount_amount, 2)
+
+        # --- Step 2: everything validated -> create order, items, reduce stock ---
+        cur.execute(
+            "INSERT INTO orders (user_id, total_amount, address, status, coupon_code, discount_amount) "
+            "VALUES (%s, %s, %s, 'Pending', %s, %s)",
+            (session["user_id"], total, address, applied_code, discount_amount),
+        )
+        order_id = cur.lastrowid
+
+        for product_id, entry in product_rows.items():
+            product = entry["product"]
+            quantity = entry["quantity"]
+
+            cur.execute("""
+                INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+                VALUES (%s, %s, %s, %s)
+            """, (order_id, product_id, quantity, product["price"]))
+
+            cur.execute(
+                "UPDATE products SET stock = stock - %s WHERE id = %s",
+                (quantity, product_id),
+            )
+
+        db.commit()
+        return jsonify({
+            "order_id": order_id,
+            "subtotal": subtotal,
+            "discount_amount": discount_amount,
+            "total_amount": total,
+            "status": "Pending",
+            "message": "Order placed successfully",
+        }), 201
+
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": "Could not place order", "detail": str(e)}), 500
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/orders/my", methods=["GET"])
+@login_required
+def my_orders():
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT * FROM orders WHERE user_id = %s ORDER BY ordered_at DESC
+        """, (session["user_id"],))
+        orders = cur.fetchall()
+
+        for order in orders:
+            cur.execute("""
+                SELECT oi.*, p.name AS product_name, p.image_url
+                FROM order_items oi
+                JOIN products p ON oi.product_id = p.id
+                WHERE oi.order_id = %s
+            """, (order["id"],))
+            order["items"] = cur.fetchall()
+
+        return jsonify(orders)
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Order routes (admin only)
+# ------------------------------------------------------------------
+@app.route("/api/orders", methods=["GET"])
+@admin_required
+def all_orders():
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT o.*, u.name AS customer_name, u.email AS customer_email
+            FROM orders o
+            JOIN users u ON o.user_id = u.id
+            ORDER BY o.ordered_at DESC
+        """)
+        orders = cur.fetchall()
+
+        for order in orders:
+            cur.execute("""
+                SELECT oi.*, p.name AS product_name
+                FROM order_items oi
+                JOIN products p ON oi.product_id = p.id
+                WHERE oi.order_id = %s
+            """, (order["id"],))
+            order["items"] = cur.fetchall()
+
+        return jsonify(orders)
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/orders/<int:order_id>/status", methods=["PUT"])
+@admin_required
+def update_order_status(order_id):
+    data = request.get_json() or {}
+    status = data.get("status")
+    valid = ["Pending", "Confirmed", "Shipped", "Delivered", "Cancelled"]
+    if status not in valid:
+        return jsonify({"error": f"Status must be one of {valid}"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
+        db.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "Order not found"}), 404
+        return jsonify({"message": "Order status updated", "status": status})
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.errorhandler(413)
+def file_too_large(e):
+    return jsonify({"error": "Image is too large (max 2 MB)"}), 413
+
+
+# ------------------------------------------------------------------
+# Coupon routes
+# ------------------------------------------------------------------
+def get_valid_coupon(cur, code):
+    """Returns the coupon row if it exists, is active, and hasn't expired; else None."""
+    cur.execute("""
+        SELECT * FROM coupons
+        WHERE code = %s AND active = TRUE
+          AND (expires_at IS NULL OR expires_at >= CURDATE())
+    """, (code,))
+    return cur.fetchone()
+
+
+@app.route("/api/coupons/validate", methods=["POST"])
+@login_required
+def validate_coupon():
+    data = request.get_json() or {}
+    code = data.get("code", "").strip().upper()
+    subtotal = float(data.get("subtotal", 0))
+
+    if not code:
+        return jsonify({"error": "Enter a coupon code"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        coupon = get_valid_coupon(cur, code)
+        if not coupon:
+            return jsonify({"error": "Invalid or expired coupon code"}), 404
+
+        discount_amount = round(subtotal * coupon["discount_percent"] / 100, 2)
+        return jsonify({
+            "code": coupon["code"],
+            "discount_percent": coupon["discount_percent"],
+            "discount_amount": discount_amount,
+        })
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/coupons", methods=["GET"])
+@admin_required
+def list_coupons():
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT * FROM coupons ORDER BY created_at DESC")
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/coupons", methods=["POST"])
+@admin_required
+def create_coupon():
+    data = request.get_json() or {}
+    code = data.get("code", "").strip().upper()
+    discount_percent = data.get("discount_percent")
+    expires_at = data.get("expires_at") or None
+
+    if not code or not discount_percent:
+        return jsonify({"error": "code and discount_percent are required"}), 400
+    if not (1 <= int(discount_percent) <= 100):
+        return jsonify({"error": "discount_percent must be between 1 and 100"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id FROM coupons WHERE code = %s", (code,))
+        if cur.fetchone():
+            return jsonify({"error": "A coupon with that code already exists"}), 409
+
+        cur.execute("""
+            INSERT INTO coupons (code, discount_percent, active, expires_at)
+            VALUES (%s, %s, TRUE, %s)
+        """, (code, discount_percent, expires_at))
+        db.commit()
+        return jsonify({"id": cur.lastrowid, "message": "Coupon created"}), 201
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/coupons/<int:coupon_id>/toggle", methods=["PUT"])
+@admin_required
+def toggle_coupon(coupon_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT active FROM coupons WHERE id = %s", (coupon_id,))
+        coupon = cur.fetchone()
+        if not coupon:
+            return jsonify({"error": "Coupon not found"}), 404
+
+        new_status = not coupon["active"]
+        cur.execute("UPDATE coupons SET active = %s WHERE id = %s", (new_status, coupon_id))
+        db.commit()
+        return jsonify({"message": "Coupon updated", "active": new_status})
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/coupons/<int:coupon_id>", methods=["DELETE"])
+@admin_required
+def delete_coupon(coupon_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("DELETE FROM coupons WHERE id = %s", (coupon_id,))
+        db.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "Coupon not found"}), 404
+        return jsonify({"message": "Coupon deleted"})
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Admin sales summary
+# ------------------------------------------------------------------
+@app.route("/api/admin/stats", methods=["GET"])
+@admin_required
+def admin_stats():
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total_orders,
+                COALESCE(SUM(CASE WHEN status != 'Cancelled' THEN total_amount ELSE 0 END), 0) AS total_revenue
+            FROM orders
+        """)
+        summary = cur.fetchone()
+
+        cur.execute("""
+            SELECT
+                p.id, p.name, p.image_url,
+                SUM(oi.quantity) AS units_sold,
+                SUM(oi.quantity * oi.unit_price) AS revenue
+            FROM order_items oi
+            JOIN products p ON oi.product_id = p.id
+            JOIN orders o ON oi.order_id = o.id
+            WHERE o.status != 'Cancelled'
+            GROUP BY p.id
+            ORDER BY units_sold DESC
+            LIMIT 5
+        """)
+        top_products = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) AS low_stock_count FROM products WHERE stock < 5")
+        low_stock = cur.fetchone()
+
+        return jsonify({
+            "total_orders": summary["total_orders"],
+            "total_revenue": float(summary["total_revenue"]),
+            "low_stock_count": low_stock["low_stock_count"],
+            "top_products": top_products,
+        })
+    finally:
+        cur.close()
+        db.close()
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
