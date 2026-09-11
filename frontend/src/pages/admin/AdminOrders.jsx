@@ -1,16 +1,29 @@
 import { useEffect, useState } from 'react'
 import api from '../../api'
+import Pagination from '../../components/Pagination'
 
 const STATUSES = ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled']
+const PAGE_SIZE = 10
 
 export default function AdminOrders() {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [updatingId, setUpdatingId] = useState(null)
 
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [total, setTotal] = useState(0)
+
   useEffect(() => {
-    api.get('/orders').then(res => setOrders(res.data)).finally(() => setLoading(false))
-  }, [])
+    setLoading(true)
+    api.get('/orders', { params: { page: currentPage, limit: PAGE_SIZE } })
+      .then(res => {
+        setOrders(res.data.orders)
+        setTotalPages(res.data.total_pages)
+        setTotal(res.data.total)
+      })
+      .finally(() => setLoading(false))
+  }, [currentPage])
 
   async function handleStatusChange(orderId, status) {
     setUpdatingId(orderId)
@@ -28,44 +41,58 @@ export default function AdminOrders() {
     <div className="page">
       <h1>All Orders</h1>
 
+      {!loading && total > 0 && (
+        <p className="result-count">
+          Showing {orders.length} of {total} order{total === 1 ? '' : 's'}
+        </p>
+      )}
+
       {loading ? (
         <p>Loading...</p>
       ) : orders.length === 0 ? (
         <p>No orders yet.</p>
       ) : (
-        <table className="admin-table">
-          <thead>
-            <tr>
-              <th>Order ID</th><th>Customer</th><th>Date</th>
-              <th>Items</th><th>Total</th><th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map(order => (
-              <tr key={order.id}>
-                <td>#{order.id}</td>
-                <td>{order.customer_name}<br /><small>{order.customer_email}</small></td>
-                <td>{new Date(order.ordered_at).toLocaleDateString()}</td>
-                <td>
-                  {order.items.map(item => (
-                    <div key={item.id}>{item.product_name} × {item.quantity}</div>
-                  ))}
-                </td>
-                <td>${Number(order.total_amount).toFixed(2)}</td>
-                <td>
-                  <select
-                    value={order.status}
-                    disabled={updatingId === order.id}
-                    onChange={e => handleStatusChange(order.id, e.target.value)}
-                    className={`status-select status-${order.status.toLowerCase()}`}
-                  >
-                    {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </td>
+        <>
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Order ID</th><th>Customer</th><th>Date</th>
+                <th>Items</th><th>Total</th><th>Status</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {orders.map(order => (
+                <tr key={order.id}>
+                  <td>#{order.id}</td>
+                  <td>{order.customer_name}<br /><small>{order.customer_email}</small></td>
+                  <td>{new Date(order.ordered_at).toLocaleDateString()}</td>
+                  <td>
+                    {order.items.map(item => (
+                      <div key={item.id}>{item.product_name} × {item.quantity}</div>
+                    ))}
+                  </td>
+                  <td>${Number(order.total_amount).toFixed(2)}</td>
+                  <td>
+                    <select
+                      value={order.status}
+                      disabled={updatingId === order.id}
+                      onChange={e => handleStatusChange(order.id, e.target.value)}
+                      className={`status-select status-${order.status.toLowerCase()}`}
+                    >
+                      {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <Pagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onPageChange={setCurrentPage}
+          />
+        </>
       )}
     </div>
   )

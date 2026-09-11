@@ -31,6 +31,24 @@ def allowed_file(filename):
     return "." in filename and ext in ALLOWED_EXTENSIONS
 
 
+def delete_uploaded_file(image_url):
+    """
+    Deletes a file previously saved by /api/upload, given its stored
+    relative path (e.g. "/static/uploads/abc123.jpg"). Safe to call with
+    None or a path that isn't one of our own uploads (e.g. a leftover
+    external URL) - it just does nothing in that case.
+    """
+    if not image_url or not image_url.startswith("/static/uploads/"):
+        return
+    filename = image_url.rsplit("/", 1)[-1]
+    filepath = os.path.join(UPLOAD_FOLDER, secure_filename(filename))
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass  # don't let a filesystem hiccup break the request
+
+
 # ------------------------------------------------------------------
 # Helpers / decorators
 # ------------------------------------------------------------------
@@ -194,41 +212,56 @@ def get_products():
     category = request.args.get("category")
     search = request.args.get("search")
     sort = request.args.get("sort")
+    page = max(int(request.args.get("page", 1)), 1)
+    limit = max(int(request.args.get("limit", 8)), 1)
+    offset = (page - 1) * limit
 
-    query = """
-        SELECT p.*, c.name AS category_name,
-               ROUND(AVG(r.rating), 1) AS avg_rating,
-               COUNT(DISTINCT r.id) AS rating_count
-        FROM products p
-        LEFT JOIN categories c ON p.category_id = c.id
-        LEFT JOIN ratings r ON r.product_id = p.id
-        WHERE 1=1
-    """
+    where_clause = " WHERE 1=1"
     params = []
 
     if category:
-        query += " AND p.category_id = %s"
+        where_clause += " AND p.category_id = %s"
         params.append(category)
 
     if search:
-        query += " AND (p.name LIKE %s OR p.description LIKE %s)"
+        where_clause += " AND (p.name LIKE %s OR p.description LIKE %s)"
         like = f"%{search}%"
         params.extend([like, like])
-
-    query += " GROUP BY p.id"
 
     sort_map = {
         "price_asc": " ORDER BY p.price ASC",
         "price_desc": " ORDER BY p.price DESC",
         "newest": " ORDER BY p.created_at DESC",
     }
-    query += sort_map.get(sort, " ORDER BY p.id ASC")
+    order_clause = sort_map.get(sort, " ORDER BY p.id ASC")
 
     db = get_db()
     cur = db.cursor(dictionary=True)
     try:
-        cur.execute(query, params)
-        return jsonify(cur.fetchall())
+        # count total matching products first, so the frontend knows how many pages exist
+        count_query = "SELECT COUNT(*) AS total FROM products p" + where_clause
+        cur.execute(count_query, params)
+        total = cur.fetchone()["total"]
+
+        query = """
+            SELECT p.*, c.name AS category_name,
+                   ROUND(AVG(r.rating), 1) AS avg_rating,
+                   COUNT(DISTINCT r.id) AS rating_count
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN ratings r ON r.product_id = p.id
+        """ + where_clause + " GROUP BY p.id" + order_clause + " LIMIT %s OFFSET %s"
+
+        cur.execute(query, params + [limit, offset])
+        products = cur.fetchall()
+
+        return jsonify({
+            "products": products,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": max(1, -(-total // limit)),  # ceiling division
+        })
     finally:
         cur.close()
         db.close()
@@ -252,7 +285,77 @@ def get_product(product_id):
         product = cur.fetchone()
         if not product:
             return jsonify({"error": "Product not found"}), 404
+
+        cur.execute(
+            "SELECT id, image_url FROM product_images WHERE product_id = %s ORDER BY id",
+            (product_id,),
+        )
+        product["images"] = cur.fetchall()
+
         return jsonify(product)
+    finally:
+        cur.close()
+        db.close()
+
+
+# ------------------------------------------------------------------
+# Product gallery routes (admin only)
+# ------------------------------------------------------------------
+@app.route("/api/products/<int:product_id>/images", methods=["POST"])
+@admin_required
+def add_product_image(product_id):
+    if "image" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+    if not allowed_file(file.filename):
+        return jsonify({"error": "Invalid file type. Allowed: png, jpg, jpeg, webp"}), 400
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id FROM products WHERE id = %s", (product_id,))
+        if not cur.fetchone():
+            return jsonify({"error": "Product not found"}), 404
+
+        ext = file.filename.rsplit(".", 1)[-1].lower()
+        unique_name = f"{uuid.uuid4().hex}.{ext}"
+        safe_name = secure_filename(unique_name)
+        file.save(os.path.join(app.config["UPLOAD_FOLDER"], safe_name))
+        image_url = f"/static/uploads/{safe_name}"
+
+        cur.execute(
+            "INSERT INTO product_images (product_id, image_url) VALUES (%s, %s)",
+            (product_id, image_url),
+        )
+        db.commit()
+        return jsonify({"id": cur.lastrowid, "image_url": image_url}), 201
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/products/<int:product_id>/images/<int:image_id>", methods=["DELETE"])
+@admin_required
+def delete_product_image(product_id, image_id):
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "SELECT image_url FROM product_images WHERE id = %s AND product_id = %s",
+            (image_id, product_id),
+        )
+        image = cur.fetchone()
+        if not image:
+            return jsonify({"error": "Image not found"}), 404
+
+        cur.execute("DELETE FROM product_images WHERE id = %s", (image_id,))
+        db.commit()
+
+        delete_uploaded_file(image["image_url"])
+        return jsonify({"message": "Image deleted"})
     finally:
         cur.close()
         db.close()
@@ -416,9 +519,12 @@ def update_product(product_id):
     db = get_db()
     cur = db.cursor(dictionary=True)
     try:
-        cur.execute("SELECT id FROM products WHERE id = %s", (product_id,))
-        if not cur.fetchone():
+        cur.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+        existing = cur.fetchone()
+        if not existing:
             return jsonify({"error": "Product not found"}), 404
+
+        new_image_url = data.get("image_url", "")
 
         cur.execute("""
             UPDATE products
@@ -427,10 +533,16 @@ def update_product(product_id):
             WHERE id=%s
         """, (
             data.get("name"), data.get("description", ""), data.get("price"),
-            data.get("stock"), data.get("category_id"), data.get("image_url", ""),
+            data.get("stock"), data.get("category_id"), new_image_url,
             product_id,
         ))
         db.commit()
+
+        # the cover image was replaced with a different file - remove the old one from disk
+        old_image_url = existing["image_url"]
+        if old_image_url and old_image_url != new_image_url:
+            delete_uploaded_file(old_image_url)
+
         return jsonify({"message": "Product updated"})
     finally:
         cur.close()
@@ -443,10 +555,23 @@ def delete_product(product_id):
     db = get_db()
     cur = db.cursor(dictionary=True)
     try:
+        cur.execute("SELECT image_url FROM products WHERE id = %s", (product_id,))
+        product = cur.fetchone()
+        if not product:
+            return jsonify({"error": "Product not found"}), 404
+
+        cur.execute("SELECT image_url FROM product_images WHERE product_id = %s", (product_id,))
+        gallery_images = cur.fetchall()
+
+        # ON DELETE CASCADE removes the product_images rows automatically
         cur.execute("DELETE FROM products WHERE id = %s", (product_id,))
         db.commit()
-        if cur.rowcount == 0:
-            return jsonify({"error": "Product not found"}), 404
+
+        # clean up every file that belonged only to this product
+        delete_uploaded_file(product["image_url"])
+        for img in gallery_images:
+            delete_uploaded_file(img["image_url"])
+
         return jsonify({"message": "Product deleted"})
     finally:
         cur.close()
@@ -578,15 +703,23 @@ def my_orders():
 @app.route("/api/orders", methods=["GET"])
 @admin_required
 def all_orders():
+    page = max(int(request.args.get("page", 1)), 1)
+    limit = max(int(request.args.get("limit", 10)), 1)
+    offset = (page - 1) * limit
+
     db = get_db()
     cur = db.cursor(dictionary=True)
     try:
+        cur.execute("SELECT COUNT(*) AS total FROM orders")
+        total = cur.fetchone()["total"]
+
         cur.execute("""
             SELECT o.*, u.name AS customer_name, u.email AS customer_email
             FROM orders o
             JOIN users u ON o.user_id = u.id
             ORDER BY o.ordered_at DESC
-        """)
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
         orders = cur.fetchall()
 
         for order in orders:
@@ -598,7 +731,13 @@ def all_orders():
             """, (order["id"],))
             order["items"] = cur.fetchall()
 
-        return jsonify(orders)
+        return jsonify({
+            "orders": orders,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": max(1, -(-total // limit)),
+        })
     finally:
         cur.close()
         db.close()

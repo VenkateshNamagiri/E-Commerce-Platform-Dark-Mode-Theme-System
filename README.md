@@ -1,424 +1,162 @@
-E-Commerce Product Management System:
+# ShopEasy — E-Commerce Platform
 
-A full-stack E-Commerce web application built using React, Flask, MySQL, and Axios.
+Full-stack app: **React (Vite) + Flask + MySQL**.
 
-This project provides product management functionality with a real image upload system. Instead of using randomly generated placeholder image URLs, administrators can upload actual product images that are stored on the Flask server and served back to the React frontend.
+## 1. Database
 
-🚀 Features:
+Open a MySQL shell (or MySQL Workbench) and run:
 
-Admin product management
-Add new products
-Edit existing products
-Delete products
-View product details
-Product image upload
-Instant image preview before upload
-Image validation
-Unique filenames for uploaded images
-Images stored on the Flask server
-MySQL database integration
-REST API using Flask
-React frontend
-Axios for API communication
-Toast notifications for success and error messages
-Responsive product interface
-Fallback "No image" display when a product has no image
+```sql
+source backend/schema.sql;
+```
 
-🛠️ Technologies Used:
+This creates the `ecommerce` database and all tables (fresh install).
 
-Frontend:
+**If you already have the database set up** from before these new features
+(ratings/wishlist/coupons/dashboard) were added, don't re-run `schema.sql`
+(it would wipe your data) — instead run the migration, which only adds
+what's new:
 
-React
-Axios
-JavaScript
-HTML
-CSS
+```powershell
+Get-Content backend/migrate_v2.sql | mysql -u root -p ecommerce
+```
 
-Backend:
+## 2. Backend (Flask)
 
-Python
-Flask
-Flask-CORS
-Werkzeug
-MySQL Connector
-Database
-MySQL
-File Upload
-multipart/form-data
-Python uuid
-Flask static file serving
-
-📁 Project Structure:
-
-A typical project structure looks like this:
-
-e-commerce/
-│
-├── backend/
-│   ├── app.py
-│   ├── static/
-│   │   └── uploads/
-│   │       └── uploaded-images
-│   └── ...
-│
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── ProductCard.jsx
-│   │   │   ├── ProductDetail.jsx
-│   │   │   └── ProductForm.jsx
-│   │   ├── ...
-│   │   └── App.jsx
-│   ├── package.json
-│   └── ...
-│
-└── README.md
-
-⚙️ Backend Setup
-1. Navigate to the backend folder
+```bash
 cd backend
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-2. Install the required Python packages
-pip install flask flask-cors mysql-connector-python
+Open `config.py` and set your MySQL `user` / `password`.
 
+Seed sample data (4 categories, 20 products, an admin + a customer account):
 
-Werkzeug is included with Flask, so it does not need to be installed separately.
+```bash
+python seed.py
+```
 
-3. Configure MySQL
+Start the API:
 
-Create the required MySQL database and products table.
-
-Example:
-
-CREATE DATABASE ecommerce;
-
-USE ecommerce;
-
-CREATE TABLE products (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    price DECIMAL(10,2) NOT NULL,
-    image_url VARCHAR(500)
-);
-
-
-Update the MySQL connection details in the Flask application according to your local environment.
-
-4. Configure the upload folder
-
-The backend uses:
-
-UPLOAD_FOLDER = 'static/uploads'
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-
-Uploaded images are saved inside:
-
-backend/static/uploads/
-
-🖼️ Image Upload System
-
-The application uses real uploaded image files instead of dynamically generated image URLs.
-
-The upload process works as follows:
-
-Admin selects image
-       ↓
-React creates FormData
-       ↓
-Axios sends multipart/form-data
-       ↓
-Flask receives the image
-       ↓
-File type is validated
-       ↓
-Unique filename is generated
-       ↓
-Image is saved in static/uploads
-       ↓
-Flask returns image_url
-       ↓
-Product is created/updated with image_url
-       ↓
-React displays the stored image
-
-Allowed Image Types
-
-The application accepts:
-
-PNG
-JPG
-JPEG
-WebP
-
-Example validation:
-
-def allowed_file(filename):
-    ext = filename.rsplit('.', 1)[-1].lower()
-    return '.' in filename and ext in ALLOWED_EXTENSIONS
-
-Unique Filenames
-
-Each uploaded image receives a unique filename using UUID:
-
-ext = file.filename.rsplit('.', 1)[-1].lower()
-unique_name = f"{uuid.uuid4().hex}.{ext}"
-
-
-This prevents two files with the same original filename from overwriting each other.
-
-For example:
-
-photo.jpg
-
-
-could become:
-
-a82f5c7e91d24b8f9c2e.jpg
-
-🔌 API Endpoints
-Upload Image
-POST /api/upload
-
-
-Accepts an image using multipart/form-data.
-
-The image must be sent using the field name:
-
-image
-
-
-Successful response:
-
-{
-    "image_url": "/static/uploads/example.jpg"
-}
-
-Get Products
-GET /api/products
-
-
-Returns the available products.
-
-Get Product
-GET /api/products/<id>
-
-
-Returns a specific product.
-
-Create Product
-POST /api/products
-
-
-Creates a product using the image_url returned from the upload endpoint.
-
-Example request:
-
-{
-    "name": "Laptop",
-    "description": "Powerful laptop",
-    "price": 50000,
-    "image_url": "/static/uploads/example.jpg"
-}
-
-Update Product
-PUT /api/products/<id>
-
-
-Updates an existing product.
-
-Delete Product
-DELETE /api/products/<id>
-
-
-Deletes a product.
-
-💻 Frontend Setup
-
-1. Navigate to the frontend folder
-cd frontend
-
-2. Install dependencies
-npm install
-
-3. Start the React development server
-npm run dev
-
-
-The frontend will normally be available at the URL shown by the development server.
-
-▶️ Running the Application
-
-Start the Flask backend first:
-
-cd backend
+```bash
 python app.py
+```
 
+Runs at **http://localhost:5000**.
 
-Then start the React frontend in a separate terminal:
+Demo logins created by `seed.py`:
+| Role     | Email                | Password    |
+|----------|-----------------------|-------------|
+| Admin    | admin@example.com     | admin123    |
+| Customer | customer@example.com  | customer123 |
 
+## 3. Frontend (React + Vite)
+
+In a new terminal:
+
+```bash
 cd frontend
+npm install
 npm run dev
+```
 
+Runs at **http://localhost:5173** and talks to the API at `localhost:5000`
+(cookies are sent cross-origin via `withCredentials: true` + Flask-CORS).
 
-The React application communicates with the Flask API using Axios.
+## 4. Try it out
 
-📤 Uploading a Product Image
+1. Visit `http://localhost:5173`, browse products, filter/search/sort.
+2. Register a new account (or log in as the demo customer), add items to
+   the cart, check out with an address. Try coupon code `WELCOME10` or
+   `SAVE20` (seeded automatically) at checkout.
+3. After an order is delivered (or really, right away — the check is just
+   "have you purchased this product"), go to the product page and leave a
+   star rating + review.
+4. Click the heart icon on any product to add it to your wishlist, and
+   view it all at `/wishlist`.
+5. Log in as the demo admin to add/edit/delete products, manage orders,
+   manage coupons at `/admin/coupons`, and view the sales dashboard at
+   `/admin`.
 
-The admin product form contains a file input instead of an image URL field:
+## New features (v4 - pagination + debounced search)
 
-<input
-    type="file"
-    accept="image/*"
-    onChange={handleFileChange}
-/>
+- **`GET /api/products`** now takes `?page=&limit=&search=&category=&sort=`
+  and returns `{ products, total, page, limit, total_pages }` instead of a
+  bare array. Uses `LIMIT`/`OFFSET` server-side, so only one page of rows
+  is ever fetched.
+- **`GET /api/orders`** (admin) takes `?page=&limit=` the same way, returning
+  `{ orders, total, page, limit, total_pages }`.
+- **`useDebounce` hook** (`src/hooks/useDebounce.js`) — the search input
+  updates on every keystroke (no typing lag), but the value used to
+  trigger an API call only updates 300ms after the user stops typing.
+- **`Pagination` component** (`src/components/Pagination.jsx`) — Previous/
+  Next buttons, numbered pages, current page highlighted. Used on the
+  Home page (products, 8/page) and `/admin/orders` (10/page).
+- Changing the search text, category, or sort on Home resets back to
+  page 1 automatically.
+- `AdminProducts.jsx` (the admin management table) isn't paginated per
+  this task's spec, so it just requests a high `limit` to keep showing
+  everything at once - it was updated only to unwrap the new response
+  shape.
 
+## New features (v3 - image upload upgrades)
 
-When an image is selected, an instant preview is displayed:
+- **Drag-and-drop upload** — the admin product form's image inputs are now
+  a `DropzoneUpload` component: drag a file onto it, or click to browse.
+- **Old file cleanup** — when a product's cover image is replaced, or the
+  product is deleted, the old file(s) are removed from
+  `backend/static/uploads/` on disk, not just unlinked in the database.
+- **Product image gallery** — a `product_images` table holds extra photos
+  per product. Manage them from the product's edit page (upload/delete
+  each one); the product detail page shows a thumbnail strip that swaps
+  the large image. Needs `migrate_v3.sql` if you're updating an existing
+  database.
+- **Upload progress** — both the cover image and gallery uploads show a
+  live percentage bar via Axios's `onUploadProgress`.
 
-const [file, setFile] = useState(null);
-const [preview, setPreview] = useState(null);
+## New features (v2)
 
-function handleFileChange(e) {
-    const selected = e.target.files[0];
+- **Product ratings** — customers who've purchased a product can leave a
+  1–5 star rating + optional review (`ratings` table). One rating per
+  user per product; submitting again updates it.
+- **Wishlist** — heart icon on any product card/detail page, backed by a
+  `wishlist` table and a `WishlistContext` (same pattern as the cart).
+- **Coupons** — `coupons` table with a code, discount %, active flag, and
+  optional expiry. Validated live at checkout (`POST /api/coupons/validate`)
+  and re-validated server-side when the order is placed, so a coupon can't
+  be forged or reused after being deactivated. Admins manage coupons at
+  `/admin/coupons`.
+- **Low stock warnings** — any product with stock < 5 shows an amber
+  "Only N left" badge on product cards, the detail page, and the admin
+  product table. The dashboard also shows a running low-stock count.
+- **Admin sales dashboard** (`/admin`) — total revenue (excluding
+  cancelled orders), total order count, low-stock count, and a top-5
+  best-selling products table by units sold.
 
-    setFile(selected);
-    setPreview(URL.createObjectURL(selected));
-}
+## How the pieces fit together
 
+- **CartContext** (`src/context/CartContext.jsx`) holds the cart in
+  React state (persisted to `localStorage` so a refresh doesn't lose it).
+  Any component calls `useCart()` to read/update it — no prop drilling.
+- **AuthContext** (`src/context/AuthContext.jsx`) holds the logged-in
+  user, backed by the Flask session cookie. `ProtectedRoute` and
+  `AdminRoute` read `useAuth()` to guard pages.
+- **Stock safety**: `POST /api/orders` first checks every item has
+  enough stock, and only *after* every item passes does it create the
+  order and decrement stock — so a failed order never partially reduces
+  inventory.
+- **Price history**: `order_items.unit_price` is copied from the
+  product at order time, so later price changes never rewrite past
+  orders.
 
-When the form is submitted, the image is uploaded first:
+## Notes / things you may want to extend
 
-const formData = new FormData();
-formData.append('image', file);
-
-const uploadRes = await api.post(
-    '/api/upload',
-    formData,
-    {
-        headers: {
-            'Content-Type': 'multipart/form-data'
-        }
-    }
-);
-
-
-The returned image_url is then used when creating or updating the product.
-
-🖼️ Displaying Uploaded Images:
-
-Uploaded images are served by Flask from:
-
-/static/uploads/<filename>
-
-
-The React frontend constructs the complete URL:
-
-<img
-    src={`http://localhost:5000${product.image_url}`}
-    alt={product.name}
-/>
-
-
-For example:
-
-/static/uploads/abc123.jpg
-
-
-becomes:
-
-http://localhost:5000/static/uploads/abc123.jpg
-
-
-If a product does not contain an image, the application displays:
-
-No image
-
-
-instead of showing a broken image.
-
-🔒 File Validation
-
-The application restricts uploaded files to supported image formats.
-
-ALLOWED_EXTENSIONS = {
-    'png',
-    'jpg',
-    'jpeg',
-    'webp'
-}
-
-
-A maximum upload size of 2 MB can be enforced with Flask:
-
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
-
-
-Invalid file types are rejected with an error response.
-
-🔄 Why Real Image Uploads?
-
-Earlier versions of the project used dynamically generated Picsum image URLs.
-
-This caused a problem because the image could change or become mismatched when the page was loaded again.
-
-The improved system stores the actual uploaded image on the server.
-
-Instead of:
-
-Product → Random image URL
-
-
-the application now uses:
-
-Product
-   ↓
-Stored image_url
-   ↓
-Exact uploaded file
-
-
-Therefore, the same product always displays the same uploaded image.
-
-🧪 Testing Checklist:
-
-Before considering the application complete, verify:
-
- Backend starts successfully.
- React frontend starts successfully.
- MySQL connection works.
- Products can be added.
- Products can be edited.
- Products can be deleted.
- Products can be viewed.
- Image file can be selected.
- Image preview appears immediately.
- Valid image types upload successfully.
- Invalid file types are rejected.
- Files larger than the configured limit are rejected.
- Uploaded images appear in static/uploads.
- Uploaded image URLs are stored in the database.
- Product cards display the correct image.
- Product details display the correct image.
- Products without images show "No image".
- No Picsum URLs are used.
-
-📌 Important Notes:
-
-Do not manually enter image URLs in the product form.
-Images should be uploaded through /api/upload.
-The returned image_url should be stored with the product.
-Uploaded files should have unique filenames.
-The static/uploads directory must exist or be created automatically.
-During development, the frontend uses the Flask backend running on localhost:5000.
-
-🎯 Project Goal:
-
-The goal of this project is to demonstrate a complete full-stack E-Commerce product management workflow, including real file upload, server-side storage, database persistence, and frontend image rendering.
-
-The image upload system makes the project closer to how real-world E-Commerce administration systems handle product images.
+- Passwords are hashed with bcrypt; sessions are Flask's signed cookie
+  sessions (fine for this project — swap for JWT if you need a
+  stateless API later).
+- `config.py` has DB credentials in plain text for simplicity — use
+  environment variables before deploying anywhere real.
+- Product images use placeholder URLs (picsum.photos) from `seed.py` —
+  swap in real image URLs any time via the admin edit form.

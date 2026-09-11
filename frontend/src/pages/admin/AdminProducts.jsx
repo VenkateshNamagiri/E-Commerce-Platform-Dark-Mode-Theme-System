@@ -10,8 +10,10 @@ export default function AdminProducts() {
 
   function loadProducts() {
     setLoading(true)
-    api.get('/products')
-      .then(res => setProducts(res.data))
+    // the admin management table isn't paginated per this task's spec -
+    // just ask for a high limit so it still sees everything at once
+    api.get('/products', { params: { limit: 1000 } })
+      .then(res => setProducts(res.data.products))
       .catch(() => setError('Could not load products'))
       .finally(() => setLoading(false))
   }
