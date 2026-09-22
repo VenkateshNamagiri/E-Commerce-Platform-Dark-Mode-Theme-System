@@ -1,17 +1,31 @@
 import os
 import uuid
-from flask import Flask, request, jsonify, session
+from datetime import timedelta
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
+from flask_jwt_extended import (
+    JWTManager, create_access_token, create_refresh_token,
+    jwt_required, get_jwt_identity, get_jwt,
+)
 from werkzeug.utils import secure_filename
 from functools import wraps
 from config import get_db
 
 app = Flask(__name__)
-app.secret_key = "change-this-to-something-random-in-production"
 
-# allow the Vite dev server to send/receive cookies
-CORS(app, supports_credentials=True, origins=["http://localhost:5173"])
+# ------------------------------------------------------------------
+# JWT config
+# ------------------------------------------------------------------
+app.config["JWT_SECRET_KEY"] = "change-this-to-something-random-in-production"
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(minutes=15)
+app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(days=7)
+jwt = JWTManager(app)
+
+# the frontend sends the token in an Authorization header now, not a cookie,
+# so no credentials/cookies need to cross origins anymore - but the browser's
+# CORS preflight does need to be told that an Authorization header is allowed
+CORS(app, origins=["http://localhost:5173"], allow_headers=["Content-Type", "Authorization"])
 bcrypt = Bcrypt(app)
 
 # ------------------------------------------------------------------
@@ -53,21 +67,26 @@ def delete_uploaded_file(image_url):
 # Helpers / decorators
 # ------------------------------------------------------------------
 def login_required(f):
+    """Requires a valid access token. Exposes g.user_id / g.role for the route."""
     @wraps(f)
+    @jwt_required()
     def wrapper(*args, **kwargs):
-        if "user_id" not in session:
-            return jsonify({"error": "Login required"}), 401
+        g.user_id = get_jwt_identity()
+        g.role = get_jwt().get("role")
         return f(*args, **kwargs)
     return wrapper
 
 
 def admin_required(f):
+    """Requires a valid access token AND an admin role claim."""
     @wraps(f)
+    @jwt_required()
     def wrapper(*args, **kwargs):
-        if "user_id" not in session:
-            return jsonify({"error": "Login required"}), 401
-        if session.get("role") != "admin":
+        claims = get_jwt()
+        if claims.get("role") != "admin":
             return jsonify({"error": "Admin access only"}), 403
+        g.user_id = get_jwt_identity()
+        g.role = claims.get("role")
         return f(*args, **kwargs)
     return wrapper
 
@@ -103,11 +122,17 @@ def register():
         db.commit()
         user_id = cur.lastrowid
 
-        session["user_id"] = user_id
-        session["role"] = "customer"
-        session["name"] = name
+        access_token = create_access_token(
+            identity=str(user_id),
+            additional_claims={"role": "customer", "name": name},
+        )
+        refresh_token = create_refresh_token(identity=str(user_id))
 
-        return jsonify({"id": user_id, "name": name, "email": email, "role": "customer"}), 201
+        return jsonify({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user": {"id": user_id, "name": name, "email": email, "role": "customer"},
+        }), 201
     finally:
         cur.close()
         db.close()
@@ -128,14 +153,43 @@ def login():
         if not user or not bcrypt.check_password_hash(user["password"], password):
             return jsonify({"error": "Invalid email or password"}), 401
 
-        session["user_id"] = user["id"]
-        session["role"] = user["role"]
-        session["name"] = user["name"]
+        access_token = create_access_token(
+            identity=str(user["id"]),
+            additional_claims={"role": user["role"], "name": user["name"]},
+        )
+        refresh_token = create_refresh_token(identity=str(user["id"]))
 
         return jsonify({
-            "id": user["id"], "name": user["name"],
-            "email": user["email"], "role": user["role"],
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user": {
+                "id": user["id"], "name": user["name"],
+                "email": user["email"], "role": user["role"],
+            },
         })
+    finally:
+        cur.close()
+        db.close()
+
+
+@app.route("/api/refresh", methods=["POST"])
+@jwt_required(refresh=True)
+def refresh():
+    user_id = get_jwt_identity()
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"error": "User no longer exists"}), 401
+
+        new_token = create_access_token(
+            identity=user_id,
+            additional_claims={"role": user["role"], "name": user["name"]},
+        )
+        return jsonify({"access_token": new_token})
     finally:
         cur.close()
         db.close()
@@ -143,20 +197,20 @@ def login():
 
 @app.route("/api/logout", methods=["GET"])
 def logout():
-    session.clear()
+    # JWTs are stateless - there's nothing to invalidate server-side for this
+    # app's scope. The frontend simply deletes both tokens from localStorage.
     return jsonify({"message": "Logged out"})
 
 
 @app.route("/api/me", methods=["GET"])
+@jwt_required()
 def me():
-    if "user_id" not in session:
-        return jsonify({"user": None})
+    user_id = get_jwt_identity()
+    claims = get_jwt()
     return jsonify({
-        "user": {
-            "id": session["user_id"],
-            "name": session["name"],
-            "role": session["role"],
-        }
+        "id": int(user_id),
+        "name": claims.get("name"),
+        "role": claims.get("role"),
     })
 
 
@@ -402,7 +456,7 @@ def rate_product(product_id):
             JOIN orders o ON oi.order_id = o.id
             WHERE o.user_id = %s AND oi.product_id = %s
             LIMIT 1
-        """, (session["user_id"], product_id))
+        """, (g.user_id, product_id))
         if not cur.fetchone():
             return jsonify({"error": "You can only rate products you have purchased"}), 403
 
@@ -411,7 +465,7 @@ def rate_product(product_id):
             INSERT INTO ratings (user_id, product_id, rating, review)
             VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE rating = VALUES(rating), review = VALUES(review)
-        """, (session["user_id"], product_id, rating, review))
+        """, (g.user_id, product_id, rating, review))
         db.commit()
         return jsonify({"message": "Rating saved"}), 201
     finally:
@@ -439,7 +493,7 @@ def get_wishlist():
             WHERE w.user_id = %s
             GROUP BY p.id, w.added_at
             ORDER BY w.added_at DESC
-        """, (session["user_id"],))
+        """, (g.user_id,))
         return jsonify(cur.fetchall())
     finally:
         cur.close()
@@ -459,7 +513,7 @@ def add_to_wishlist():
     try:
         cur.execute("""
             INSERT IGNORE INTO wishlist (user_id, product_id) VALUES (%s, %s)
-        """, (session["user_id"], product_id))
+        """, (g.user_id, product_id))
         db.commit()
         return jsonify({"message": "Added to wishlist"}), 201
     finally:
@@ -475,7 +529,7 @@ def remove_from_wishlist(product_id):
     try:
         cur.execute(
             "DELETE FROM wishlist WHERE user_id = %s AND product_id = %s",
-            (session["user_id"], product_id),
+            (g.user_id, product_id),
         )
         db.commit()
         return jsonify({"message": "Removed from wishlist"})
@@ -635,7 +689,7 @@ def create_order():
         cur.execute(
             "INSERT INTO orders (user_id, total_amount, address, status, coupon_code, discount_amount) "
             "VALUES (%s, %s, %s, 'Pending', %s, %s)",
-            (session["user_id"], total, address, applied_code, discount_amount),
+            (g.user_id, total, address, applied_code, discount_amount),
         )
         order_id = cur.lastrowid
 
@@ -679,7 +733,7 @@ def my_orders():
     try:
         cur.execute("""
             SELECT * FROM orders WHERE user_id = %s ORDER BY ordered_at DESC
-        """, (session["user_id"],))
+        """, (g.user_id,))
         orders = cur.fetchall()
 
         for order in orders:

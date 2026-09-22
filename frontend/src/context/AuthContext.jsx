@@ -7,28 +7,44 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  // On first load, ask the backend if we already have a valid session cookie
+  // On first load, if a token is already saved (e.g. the page was refreshed),
+  // ask the backend who it belongs to and restore the session - so the user
+  // isn't kicked back to /login just for reloading the page.
   useEffect(() => {
+    const token = localStorage.getItem('access_token')
+    if (!token) {
+      setLoading(false)
+      return
+    }
+
     api.get('/me')
-      .then(res => setUser(res.data.user))
+      .then(res => setUser(res.data))
       .catch(() => setUser(null))
       .finally(() => setLoading(false))
   }, [])
 
+  function storeTokens(data) {
+    localStorage.setItem('access_token', data.access_token)
+    localStorage.setItem('refresh_token', data.refresh_token)
+  }
+
   async function login(email, password) {
     const res = await api.post('/login', { email, password })
-    setUser(res.data)
-    return res.data
+    storeTokens(res.data)
+    setUser(res.data.user)
+    return res.data.user
   }
 
   async function register(name, email, password) {
     const res = await api.post('/register', { name, email, password })
-    setUser(res.data)
-    return res.data
+    storeTokens(res.data)
+    setUser(res.data.user)
+    return res.data.user
   }
 
   async function logout() {
-    await api.get('/logout')
+    localStorage.removeItem('access_token')
+    localStorage.removeItem('refresh_token')
     setUser(null)
   }
 

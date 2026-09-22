@@ -1,4 +1,5 @@
 flask
 flask-bcrypt
 flask-cors
+flask-jwt-extended
 mysql-connector-python

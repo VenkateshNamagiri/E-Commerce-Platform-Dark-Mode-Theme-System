@@ -80,6 +80,43 @@ Runs at **http://localhost:5173** and talks to the API at `localhost:5000`
    manage coupons at `/admin/coupons`, and view the sales dashboard at
    `/admin`.
 
+## New features (v5 - JWT authentication)
+
+Auth is now stateless JWT instead of Flask sessions - this is a bigger
+change than earlier upgrades, so read this section before testing.
+
+- **`pip install flask-jwt-extended`** is a new backend dependency
+  (already added to `requirements.txt`).
+- `POST /api/login` and `POST /api/register` now return
+  `{ access_token, refresh_token, user }` instead of setting a session
+  cookie. Access tokens expire in 15 minutes; refresh tokens in 7 days.
+- Every previously-session-protected route now uses `@login_required` /
+  `@admin_required`, which are thin wrappers around flask-jwt-extended's
+  `@jwt_required()` - same decorator names as before, so route code
+  barely changed, but they now check a `Bearer` token in the
+  `Authorization` header instead of a cookie.
+- New `POST /api/refresh` route - exchanges a valid refresh token for a
+  new access token.
+- `GET /api/me` now requires a valid access token and returns the user
+  object directly (`{ id, name, role }`), not wrapped in `{ user: ... }`.
+- **Frontend**: `api.js` now attaches `Authorization: Bearer <token>` to
+  every request via an Axios request interceptor, and a response
+  interceptor automatically retries any request that comes back 401 by
+  silently refreshing the access token first. If the refresh token has
+  also expired, the user is logged out and sent to `/login`.
+- Tokens live in `localStorage` (`access_token` / `refresh_token`).
+  `AuthContext` restores the logged-in user on page refresh by calling
+  `/api/me` if a token is present, so reloading the page no longer logs
+  you out.
+- No database changes. No new tables.
+
+**One consequence to know about:** because access tokens now expire
+after 15 minutes, staying logged in for longer than that no longer
+"just works" via a cookie - it depends on the refresh flow actually
+firing on the next API call after expiry. This is expected and correct
+JWT behavior, not a bug: the interceptor handles it silently as long as
+the refresh token (7-day lifetime) is still valid.
+
 ## New features (v4 - pagination + debounced search)
 
 - **`GET /api/products`** now takes `?page=&limit=&search=&category=&sort=`

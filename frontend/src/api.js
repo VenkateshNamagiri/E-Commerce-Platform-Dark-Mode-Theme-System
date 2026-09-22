@@ -5,7 +5,58 @@ export const API_BASE_URL = 'http://localhost:5000'
 
 const api = axios.create({
   baseURL: `${API_BASE_URL}/api`,
-  withCredentials: true, // send/receive the Flask session cookie
+  // no withCredentials/cookies anymore - JWT goes in the Authorization header instead
 })
+
+// ------------------------------------------------------------------
+// Request interceptor - attach the access token to every outgoing call
+// ------------------------------------------------------------------
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('access_token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// ------------------------------------------------------------------
+// Response interceptor - if a call comes back 401 (expired access token),
+// silently use the refresh token to get a new one and retry the original
+// request once. If the refresh itself fails, the user is logged out.
+// ------------------------------------------------------------------
+api.interceptors.response.use(
+  response => response,
+  async error => {
+    const original = error.config
+
+    if (error.response?.status === 401 && !original._retry) {
+      original._retry = true
+      try {
+        const refreshToken = localStorage.getItem('refresh_token')
+        if (!refreshToken) throw new Error('No refresh token available')
+
+        const res = await axios.post(
+          `${API_BASE_URL}/api/refresh`,
+          {},
+          { headers: { Authorization: `Bearer ${refreshToken}` } }
+        )
+
+        const newToken = res.data.access_token
+        localStorage.setItem('access_token', newToken)
+
+        original.headers.Authorization = `Bearer ${newToken}`
+        return api(original)
+      } catch {
+        // refresh failed too (expired after 7 days, or missing) - log out
+        localStorage.removeItem('access_token')
+        localStorage.removeItem('refresh_token')
+        window.location.href = '/login'
+        return Promise.reject(error)
+      }
+    }
+
+    return Promise.reject(error)
+  }
+)
 
 export default api
