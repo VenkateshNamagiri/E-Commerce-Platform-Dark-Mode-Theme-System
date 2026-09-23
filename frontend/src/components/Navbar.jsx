@@ -2,11 +2,13 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useCart } from '../context/CartContext'
 import { useWishlist } from '../context/WishlistContext'
+import { useTheme } from '../context/ThemeContext'
 
 export default function Navbar() {
   const { user, isAdmin, logout } = useAuth()
   const { cartCount } = useCart()
   const { wishlist } = useWishlist()
+  const { theme, toggleTheme } = useTheme()
   const navigate = useNavigate()
 
   async function handleLogout() {
@@ -16,7 +18,7 @@ export default function Navbar() {
 
   return (
     <nav className="navbar">
-      <Link to="/" className="navbar-brand">🛍️ ShopWorld</Link>
+      <Link to="/" className="navbar-brand">🛍️ ShopEasy</Link>
 
       <div className="navbar-links">
         <Link to="/">Home</Link>
@@ -42,6 +44,15 @@ export default function Navbar() {
           Cart
           {cartCount > 0 && <span className="cart-badge">{cartCount}</span>}
         </Link>
+
+        <button
+          className="theme-toggle-btn"
+          onClick={toggleTheme}
+          aria-label="Toggle dark mode"
+          title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+        >
+          {theme === 'light' ? '🌙' : '☀️'}
+        </button>
 
         {user ? (
           <div className="navbar-user">
